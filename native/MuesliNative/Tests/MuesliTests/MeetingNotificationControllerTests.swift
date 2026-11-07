@@ -50,6 +50,26 @@ struct MeetingNotificationControllerTests {
         #expect(textWidth >= subtitleWidth)
     }
 
+    @Test("Two-action notices fit both labels and keep the text clear of the buttons")
+    @MainActor
+    func twoActionNoticeLayout() {
+        for label in ["Stop", "Discard"] {
+            #expect(MeetingNotificationController.pairedActionLabelFits(label), "\(label) overflows its button")
+        }
+        let pairWidth = MeetingNotificationController.singleActionButtonsWidth(hasSecondaryAction: true)
+        #expect(pairWidth > MeetingNotificationController.singleActionButtonsWidth(hasSecondaryAction: false))
+        let title = "Recording started" as NSString
+        let titleWidth = title.size(withAttributes: [.font: AppFonts.font(size: 13, weight: .semibold)]).width
+        let textX: CGFloat = 14 + 26 + 9 // With a platform icon.
+        let cardWidth = MeetingNotificationController.singleActionCardWidth(
+            requiredTextWidth: titleWidth, textX: textX, buttonWidth: pairWidth
+        )
+        let textWidth = MeetingNotificationController.singleActionTextWidth(
+            cardWidth: cardWidth, textX: textX, buttonWidth: pairWidth
+        )
+        #expect(textWidth >= titleWidth)
+    }
+
     @Test("Default join action arms the matching primary button")
     func defaultJoinActionArmsMatchingPrimaryButton() {
         #expect(MeetingJoinDefaultAction.joinAndRecord

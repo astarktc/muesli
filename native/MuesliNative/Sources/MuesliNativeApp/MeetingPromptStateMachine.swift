@@ -142,11 +142,17 @@ final class MeetingPromptStateMachine {
         resetPendingCandidate()
     }
 
+    /// Only media-session candidates are consumed by a recording; other candidates
+    /// can prompt again once the recording stops.
+    static func recordingStartedSuppressesSession(of candidate: MeetingCandidate) -> Bool {
+        candidate.suppressionID.hasPrefix("meeting-session:")
+    }
+
     @discardableResult
     func markRecordingStarted(_ candidate: MeetingCandidate) -> Bool {
         if visiblePromptID == candidate.id { visiblePromptID = nil }
         lastCandidateID = candidate.id
-        guard candidate.suppressionID.hasPrefix("meeting-session:") else {
+        guard Self.recordingStartedSuppressesSession(of: candidate) else {
             resetPendingCandidate()
             return false
         }

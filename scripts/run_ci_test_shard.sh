@@ -215,6 +215,7 @@ case "${shard}" in
       DictationAudioRouteControllerTests
       MeetingContactIdentityTests
       MeetingContactResolverTests
+      MeetingAutoRecordPolicyTests
       MeetingDetectorTests
       MeetingParticipantStoreTests
       MeetingProcessingStageTests

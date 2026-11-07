@@ -10358,6 +10358,7 @@ public final class MuesliController: NSObject {
     }
 
     private func presentMeetingDetection(_ candidate: MeetingCandidate) {
+        if autoRecordDetectedMeetingIfStrong(candidate) { return }
         guard config.showMeetingDetectionNotification,
               !isShowingCalendarNotification,
               !isMeetingRecording(),
@@ -10379,21 +10380,8 @@ public final class MuesliController: NSObject {
             platform: MeetingPlatform(candidate.platform),
             onStartRecording: { [weak self] in
                 guard let self else { return }
-                let calendarEvent = candidate.evidence.contains(.calendarEvent)
-                    ? self.currentOrNearbyCachedCalendarEvent()
-                    : nil
-                if self.startMeetingRecordingFromEntryPoint(
-                    title: title,
-                    calendarOccurrence: calendarEvent?.calendarOccurrence,
-                    autoStopSource: MeetingAutoStopSource(candidate: candidate),
-                    presentation: .backgroundPill,
-                    startOrigin: .detectedPrompt
-                ) {
-                    self.meetingMonitor.markRecordingStarted(candidate)
-                    self.presentedMeetingCandidate = nil
+                if self.startRecordingDetectedMeeting(candidate) {
                     self.showPendingMeetingCompletionNotificationIfPossible()
-                } else {
-                    self.meetingMonitor.refreshState()
                 }
             },
             onDismiss: { [weak self] in
@@ -10424,6 +10412,78 @@ public final class MuesliController: NSObject {
         } else if presentedMeetingCandidate == candidate {
             presentedMeetingCandidate = nil
         }
+    }
+
+    /// Starts recording a detected meeting exactly as the prompt's start action does,
+    /// so auto-recorded meetings keep the detected origin and its auto-stop source.
+    private func startRecordingDetectedMeeting(_ candidate: MeetingCandidate) -> Bool {
+        let calendarEvent = candidate.evidence.contains(.calendarEvent)
+            ? currentOrNearbyCachedCalendarEvent()
+            : nil
+        guard startMeetingRecordingFromEntryPoint(
+            title: candidate.subtitle,
+            calendarOccurrence: calendarEvent?.calendarOccurrence,
+            autoStopSource: MeetingAutoStopSource(candidate: candidate),
+            presentation: .backgroundPill,
+            startOrigin: .detectedPrompt
+        ) else {
+            meetingMonitor.refreshState()
+            return false
+        }
+        meetingMonitor.markRecordingStarted(candidate)
+        presentedMeetingCandidate = nil
+        return true
+    }
+
+    /// "Auto-record detected meetings": a strong detection starts recording instead of
+    /// prompting. It runs only where the prompt would show, so muted apps, dismissals and
+    /// the other prompt suppressions still apply. It never interrupts the user's own
+    /// dictation, Quill or computer-use audio. A failed start falls back to the prompt.
+    private func autoRecordDetectedMeetingIfStrong(_ candidate: MeetingCandidate) -> Bool {
+        guard config.autoRecordDetectedMeetings,
+              config.showMeetingDetectionNotification,
+              !isShowingCalendarNotification,
+              !isMeetingRecording(),
+              !isStartingMeetingRecording,
+              !isInteractiveAudioActivityInProgress,
+              !isMutedMeetingDetectionCandidate(candidate),
+              MeetingAutoRecordPolicy.shouldAutoRecord(candidate) else { return false }
+        fputs("[muesli-native] auto-recording detected meeting platform=\(candidate.platform.rawValue)\n", stderr)
+        guard startRecordingDetectedMeeting(candidate), let meetingID = activeMeetingID else { return false }
+        presentAutoRecordStartedNotice(for: candidate, meetingID: meetingID)
+        return true
+    }
+
+    private func presentAutoRecordStartedNotice(for candidate: MeetingCandidate, meetingID: Int64) {
+        meetingNotification.show(
+            promptID: "meeting-auto-recorded:\(meetingID)",
+            title: "Recording started",
+            subtitle: candidate.subtitle,
+            actionLabel: "Stop",
+            preferredScreen: meetingSourceWindowLocator.screen(for: candidate),
+            platform: MeetingPlatform(candidate.platform),
+            // onStartRecording is the generic primary-action slot; here it stops the recording.
+            onStartRecording: { [weak self] in
+                guard let self, self.activeMeetingID == meetingID else { return }
+                if self.isStartingMeetingRecording, self.activeMeetingSession == nil {
+                    self.cancelMeetingPreparation()
+                } else {
+                    self.stopMeetingRecording()
+                }
+            },
+            secondaryActionLabel: "Discard",
+            onSecondaryAction: { [weak self] in
+                guard let self, self.activeMeetingID == meetingID else { return }
+                if self.isStartingMeetingRecording, self.activeMeetingSession == nil {
+                    self.cancelMeetingPreparation()
+                } else {
+                    self.discardMeetingWithConfirmation()
+                }
+            },
+            onClose: { [weak self] in
+                self?.showPendingMeetingCompletionNotificationIfPossible()
+            }
+        )
     }
 
     @MainActor

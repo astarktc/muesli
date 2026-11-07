@@ -2334,6 +2334,20 @@ struct AppConfigTests {
         #expect(config.showMeetingDetectionNotification == false)
     }
 
+    @Test("Auto-recording detected meetings defaults off and persists an opt-in")
+    func autoRecordDetectedMeetingsPersistence() throws {
+        #expect(!AppConfig().autoRecordDetectedMeetings)
+        for json in ["{}", #"{"auto_record_detected_meetings":"invalid"}"#] {
+            #expect(try JSONDecoder().decode(AppConfig.self, from: Data(json.utf8)).autoRecordDetectedMeetings == false)
+        }
+        var config = AppConfig()
+        config.autoRecordDetectedMeetings = true
+        let data = try JSONEncoder().encode(config)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["auto_record_detected_meetings"] as? Bool == true)
+        #expect(try JSONDecoder().decode(AppConfig.self, from: data).autoRecordDetectedMeetings)
+    }
+
     @Test("unsupported cohere language falls back to english")
     func unsupportedCohereLanguageFallsBackToEnglish() throws {
         let json = """

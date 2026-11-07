@@ -19,6 +19,7 @@ final class MeetingNotificationController {
     private var onJoinOnly: (() -> Void)?
     private var onDismiss: (() -> Void)?
     private var onAutoDismiss: (() -> Void)?
+    private var onSecondaryAction: (() -> Void)?
     private var splitButtonAlternatives: [MeetingJoinDefaultAction] = []
     private(set) var isVisible = false
     private(set) var currentPromptID: String?
@@ -34,6 +35,20 @@ final class MeetingNotificationController {
     static func splitButtonLabelFits(_ label: String, horizontalPadding: CGFloat = 12) -> Bool {
         let labelWidth = (label as NSString).size(withAttributes: [.font: splitButtonFont]).width
         return labelWidth + horizontalPadding <= splitButtonWidth
+    }
+
+    /// Width of each button when a single-action card also carries a secondary action.
+    static let pairedActionWidth: CGFloat = 72
+    static let pairedActionFont = AppFonts.font(size: 12, weight: .medium)
+
+    static func pairedActionLabelFits(_ label: String, horizontalPadding: CGFloat = 16) -> Bool {
+        let labelWidth = (label as NSString).size(withAttributes: [.font: pairedActionFont]).width
+        return labelWidth + horizontalPadding <= pairedActionWidth
+    }
+
+    /// Total width of the trailing buttons on a card without a join split button.
+    static func singleActionButtonsWidth(hasSecondaryAction: Bool, spacing: CGFloat = 8) -> CGFloat {
+        hasSecondaryAction ? pairedActionWidth * 2 + spacing : 126
     }
 
     static func singleActionTextWidth(
@@ -76,6 +91,8 @@ final class MeetingNotificationController {
         onJoinOnly: (() -> Void)? = nil,
         onDismiss: (() -> Void)? = nil,
         onAutoDismiss: (() -> Void)? = nil,
+        secondaryActionLabel: String? = nil,
+        onSecondaryAction: (() -> Void)? = nil,
         onClose: (() -> Void)? = nil
     ) -> Bool {
         // Nil out onClose before close() so the old panel's teardown
@@ -89,6 +106,7 @@ final class MeetingNotificationController {
         self.onJoinOnly = onJoinOnly
         self.onDismiss = onDismiss
         self.onAutoDismiss = onAutoDismiss
+        self.onSecondaryAction = onSecondaryAction
 
         let hasJoinAndRecord = meetingURL != nil && onJoinAndRecord != nil
         let hasJoinOnly = meetingURL != nil && onJoinOnly != nil
@@ -100,6 +118,9 @@ final class MeetingNotificationController {
         // Nothing to drop down (a prompt with no join link, or "Stop Transcribing")
         // keeps the plain single-action button.
         let hasJoinButton = !splitButtonAlternatives.isEmpty
+        // A secondary action sits beside the primary one on single-action cards only.
+        let secondaryLabel = hasJoinButton || onSecondaryAction == nil ? nil : secondaryActionLabel
+        let singleActionButtonsWidth = Self.singleActionButtonsWidth(hasSecondaryAction: secondaryLabel != nil)
         let platform = explicitPlatform ?? meetingURL.flatMap { MeetingPlatform.detect(from: $0) }
         let platformIcon = platform?.loadIcon()
         let iconSize: CGFloat = 26
@@ -117,6 +138,7 @@ final class MeetingNotificationController {
             cardWidth = Self.singleActionCardWidth(
                 requiredTextWidth: max(titleWidth, subtitleWidth),
                 textX: textX,
+                buttonWidth: singleActionButtonsWidth,
                 minimumWidth: minimumCardWidth
             )
         }
@@ -254,15 +276,36 @@ final class MeetingNotificationController {
             chevronButton.setAccessibilityLabel("More join options")
             cardView.addSubview(chevronButton)
         } else {
-            // Single "Start Transcribing" button
-            let buttonWidth: CGFloat = 126
+            // Single "Start Transcribing" button, optionally preceded by a secondary action
+            let buttonWidth: CGFloat = secondaryLabel == nil ? 126 : Self.pairedActionWidth
             let buttonX = cardWidth - buttonWidth - 12
-            let textWidth = Self.singleActionTextWidth(cardWidth: cardWidth, textX: textX, buttonWidth: buttonWidth)
+            let actionsX = cardWidth - singleActionButtonsWidth - 12
+            let textWidth = Self.singleActionTextWidth(
+                cardWidth: cardWidth,
+                textX: textX,
+                buttonWidth: singleActionButtonsWidth
+            )
             titleLabel.frame.size.width = textWidth
             subtitleLabel.frame.size.width = textWidth
 
+            if let secondaryLabel {
+                let secondaryButton = NSButton(
+                    title: secondaryLabel,
+                    target: self,
+                    action: #selector(handleSecondaryAction)
+                )
+                secondaryButton.font = Self.pairedActionFont
+                secondaryButton.frame = NSRect(x: actionsX, y: 15, width: Self.pairedActionWidth, height: 30)
+                secondaryButton.wantsLayer = true
+                secondaryButton.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+                secondaryButton.layer?.cornerRadius = 6
+                secondaryButton.isBordered = false
+                Self.applyTitleColor(.white, to: secondaryButton)
+                cardView.addSubview(secondaryButton)
+            }
+
             if opensFromBody {
-                let bodyAction = NSButton(frame: NSRect(x: 0, y: 0, width: buttonX, height: cardHeight))
+                let bodyAction = NSButton(frame: NSRect(x: 0, y: 0, width: actionsX, height: cardHeight))
                 bodyAction.isBordered = false
                 bodyAction.isTransparent = true
                 bodyAction.title = ""
@@ -327,6 +370,7 @@ final class MeetingNotificationController {
         onJoinOnly = nil
         onDismiss = nil
         onAutoDismiss = nil
+        onSecondaryAction = nil
         splitButtonAlternatives = []
         isVisible = false
         currentPromptID = nil
@@ -421,6 +465,14 @@ final class MeetingNotificationController {
 
     @objc private func handleStartRecording() {
         let action = onStartRecording
+        animateOut { [weak self] in
+            self?.close()
+            action?()
+        }
+    }
+
+    @objc private func handleSecondaryAction() {
+        let action = onSecondaryAction
         animateOut { [weak self] in
             self?.close()
             action?()
