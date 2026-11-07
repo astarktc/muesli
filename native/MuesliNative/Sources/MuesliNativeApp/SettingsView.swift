@@ -2455,6 +2455,13 @@ struct SettingsView: View {
                     settingsControl("auto_record_meetings")
                 }
                 Divider().background(MuesliTheme.surfaceBorder)
+                settingsCompactRow(
+                    "Stop recording when the meeting ends",
+                    description: "For detected, calendar and joined meetings. Once the call is gone and the other side is quiet, the “Meeting signal lost” warning stops recording, even if you keep talking. Close it to keep recording."
+                ) {
+                    settingsControl("stop_recording_when_meeting_ends")
+                }
+                Divider().background(MuesliTheme.surfaceBorder)
                 settingsRow("Save meeting recording") {
                     settingsControl("recording_policy")
                 }

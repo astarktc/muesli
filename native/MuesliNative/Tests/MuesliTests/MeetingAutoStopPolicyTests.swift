@@ -83,6 +83,163 @@ struct MeetingAutoStopPolicyTests {
         #expect(origin.signalLossSource(explicitSource: nil, recentSource: recent) == (tracksSource ? recent : nil))
     }
 
+    @Test("stopping when the meeting ends applies only to source-backed warnings", arguments: [
+        MeetingRecordingStartOrigin.manual, .detectedPrompt, .calendarAutoRecord,
+        .scheduledMeetingPrompt, .joinAndRecord
+    ])
+    func stopWhenMeetingEnds(origin: MeetingRecordingStartOrigin) {
+        let expected: MeetingSignalLossResponse = origin == .manual ? .transcriptInactivity : .stopAfterWarning
+        #expect(origin.signalLossResponse.stoppingWhenMeetingEnds(true) == expected)
+        #expect(origin.signalLossResponse.stoppingWhenMeetingEnds(false) == origin.signalLossResponse)
+        #expect(MeetingSignalLossResponse.stopAfterWarning.stoppingWhenMeetingEnds(false) == .warnOnly)
+        #expect(MeetingSignalLossResponse.none.stoppingWhenMeetingEnds(true) == MeetingSignalLossResponse.none)
+    }
+
+    @Test("an unanswered stopping warning stops the recording; other warnings never do", arguments: [
+        (MeetingSignalLossResponse.stopAfterWarning, true),
+        (MeetingSignalLossResponse.warnOnly, false),
+        (MeetingSignalLossResponse.transcriptInactivity, false)
+    ])
+    func timeoutStops(response: MeetingSignalLossResponse, stops: Bool) {
+        var state = MeetingSignalLossPromptState()
+        state.markPromptPresented(response: response)
+        #expect(state.isStopPending == stops)
+        let stopped = state.markTimedOut()
+        #expect(stopped == stops)
+        #expect(!state.isStopPending)
+        // Like an auto-dismissal, a timeout waits for the source to recover before warning again.
+        #expect(!state.canPresentPrompt)
+    }
+
+    @Test("closing the warning keeps recording for the rest of the recording")
+    func dismissalKeepsRecording() {
+        var state = MeetingSignalLossPromptState()
+        state.markPromptPresented(response: .stopAfterWarning)
+        state.markDismissedByUser()
+        #expect(!state.isStopPending)
+        let stopped = state.markTimedOut()
+        #expect(!stopped)
+        state.markSourceRecovered()
+        #expect(!state.canPresentPrompt)
+        state.resetForRecording()
+        #expect(state.canPresentPrompt)
+    }
+
+    @Test("renewed remote speech, a recovered source, or a non-timeout close cancels a pending stop")
+    func pendingStopCancelled() {
+        var state = MeetingSignalLossPromptState()
+        state.markPromptPresented(response: .stopAfterWarning)
+        state.noteTranscriptActivity(now: now, channel: .system)
+        let stoppedAfterSpeech = state.markTimedOut()
+        #expect(!stoppedAfterSpeech)
+
+        state.markSourceRecovered()
+        state.markPromptPresented(response: .stopAfterWarning)
+        state.markSourceRecovered()
+        let stoppedAfterRecovery = state.markTimedOut()
+        #expect(!stoppedAfterRecovery)
+
+        state.markSourceRecovered()
+        state.markPromptPresented(response: .stopAfterWarning)
+        state.markAutoDismissed() // Closed because speech resumed, or the panel could not show.
+        let stoppedAfterClose = state.markTimedOut()
+        #expect(!stoppedAfterClose)
+
+        state.markSourceRecovered()
+        state.markPromptPresented(response: .stopAfterWarning)
+        state.resetForRecording()
+        #expect(!state.isStopPending)
+    }
+
+    @Test("with the setting on, the user talking in the room after the meeting source is lost still stops")
+    func micSpeechAfterSourceLossStops() {
+        let response = MeetingRecordingStartOrigin.detectedPrompt.signalLossResponse.stoppingWhenMeetingEnds(true)
+        var state = MeetingSignalLossPromptState()
+        state.noteTranscriptActivity(now: now, channel: .system) // The remote side's last words.
+        state.noteTranscriptActivity(now: now.addingTimeInterval(58), channel: .microphone)
+        // The source has been gone past its grace period: only remote speech defers the warning.
+        #expect(!state.hasRecentTranscriptActivity(now: now.addingTimeInterval(60), quietPeriod: 45, response: response))
+        state.markPromptPresented(response: response)
+        let closesWarning = state.noteTranscriptActivity(now: now.addingTimeInterval(70), channel: .microphone)
+        #expect(!closesWarning)
+        let stopped = state.markTimedOut()
+        #expect(stopped)
+    }
+
+    @Test("with the setting on, remote speech continuing after the source is lost keeps recording")
+    func remoteSpeechKeepsRecording() {
+        let response = MeetingRecordingStartOrigin.joinAndRecord.signalLossResponse.stoppingWhenMeetingEnds(true)
+        var state = MeetingSignalLossPromptState()
+        state.noteTranscriptActivity(now: now.addingTimeInterval(50), channel: .system)
+        #expect(state.hasRecentTranscriptActivity(now: now.addingTimeInterval(60), quietPeriod: 45, response: response))
+        state.noteTranscriptActivity(now: now.addingTimeInterval(90), channel: .system)
+        #expect(state.hasRecentTranscriptActivity(now: now.addingTimeInterval(134), quietPeriod: 45, response: response))
+        #expect(!state.hasRecentTranscriptActivity(now: now.addingTimeInterval(135), quietPeriod: 45, response: response))
+        state.markPromptPresented(response: response)
+        let closesWarning = state.noteTranscriptActivity(now: now.addingTimeInterval(140), channel: .system)
+        #expect(closesWarning)
+        #expect(!state.isStopPending)
+        let stopped = state.markTimedOut()
+        #expect(!stopped)
+    }
+
+    @Test("with the setting on, a stop cancelled by remote speech warns again once the remote side is quiet")
+    func cancelledStopWarnsAgain() {
+        let response = MeetingSignalLossResponse.stopAfterWarning
+        var state = MeetingSignalLossPromptState()
+        state.markPromptPresented(response: response)
+        state.noteTranscriptActivity(now: now.addingTimeInterval(10), channel: .system)
+        #expect(state.canPresentPrompt)
+        #expect(state.hasRecentTranscriptActivity(now: now.addingTimeInterval(54.9), quietPeriod: 45, response: response))
+        #expect(!state.hasRecentTranscriptActivity(now: now.addingTimeInterval(55), quietPeriod: 45, response: response))
+        state.markPromptPresented(response: response)
+        state.noteTranscriptActivity(now: now.addingTimeInterval(60), channel: .microphone)
+        let stopped = state.markTimedOut()
+        #expect(stopped)
+    }
+
+    @Test("with the setting on, closing the warning keeps recording whatever either side says afterwards")
+    func dismissalOutlastsSpeech() {
+        let response = MeetingSignalLossResponse.stopAfterWarning
+        var state = MeetingSignalLossPromptState()
+        state.markPromptPresented(response: response)
+        state.markDismissedByUser()
+        state.noteTranscriptActivity(now: now.addingTimeInterval(10), channel: .system)
+        state.noteTranscriptActivity(now: now.addingTimeInterval(20), channel: .microphone)
+        #expect(!state.hasRecentTranscriptActivity(now: now.addingTimeInterval(120), quietPeriod: 45, response: response))
+        #expect(!state.canPresentPrompt)
+        #expect(!state.isStopPending)
+        let stopped = state.markTimedOut()
+        #expect(!stopped)
+    }
+
+    @Test("with the setting off, speech on either side defers and closes the warning, which never stops", arguments: [
+        MeetingTranscriptChannel.microphone, .system
+    ])
+    func settingOffKeepsUpstreamWarning(channel: MeetingTranscriptChannel) {
+        let response = MeetingRecordingStartOrigin.calendarAutoRecord.signalLossResponse.stoppingWhenMeetingEnds(false)
+        #expect(response == .warnOnly)
+        var state = MeetingSignalLossPromptState()
+        state.noteTranscriptActivity(now: now.addingTimeInterval(58), channel: channel)
+        #expect(state.hasRecentTranscriptActivity(now: now.addingTimeInterval(60), quietPeriod: 45, response: response))
+        #expect(!state.hasRecentTranscriptActivity(now: now.addingTimeInterval(103), quietPeriod: 45, response: response))
+        state.markPromptPresented(response: response)
+        #expect(!state.isStopPending)
+        let closesWarning = state.noteTranscriptActivity(now: now.addingTimeInterval(110), channel: channel)
+        #expect(closesWarning)
+        // As upstream: no further warning until the source recovers, and a timeout never stops.
+        #expect(!state.canPresentPrompt)
+        let stopped = state.markTimedOut()
+        #expect(!stopped)
+    }
+
+    @Test("live speaker labels map to transcript channels; unknown labels count as remote")
+    func liveSpeakerChannels() {
+        #expect(MeetingTranscriptChannel(liveSpeaker: "You") == .microphone)
+        #expect(MeetingTranscriptChannel(liveSpeaker: "Others") == .system)
+        #expect(MeetingTranscriptChannel(liveSpeaker: "Speaker 2") == .system)
+    }
+
     @Test("manual reminder waits a full quiet period, including an initially empty transcript")
     func manualReminderDeadline() {
         var state = MeetingSignalLossPromptState()

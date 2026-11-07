@@ -1141,6 +1141,20 @@ struct AppConfigTests {
         #expect(try JSONDecoder().decode(AppConfig.self, from: data).calendarMeetingLinksOnly == false)
     }
 
+    @Test("Stopping recordings when the meeting ends defaults off and persists an opt-in")
+    func stopRecordingWhenMeetingEndsPersistence() throws {
+        #expect(!AppConfig().stopRecordingWhenMeetingEnds)
+        for json in ["{}", #"{"stop_recording_when_meeting_ends":"invalid"}"#] {
+            #expect(try JSONDecoder().decode(AppConfig.self, from: Data(json.utf8)).stopRecordingWhenMeetingEnds == false)
+        }
+        var config = AppConfig()
+        config.stopRecordingWhenMeetingEnds = true
+        let data = try JSONEncoder().encode(config)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["stop_recording_when_meeting_ends"] as? Bool == true)
+        #expect(try JSONDecoder().decode(AppConfig.self, from: data).stopRecordingWhenMeetingEnds)
+    }
+
     @Test("default values")
     func defaults() {
         let config = AppConfig()

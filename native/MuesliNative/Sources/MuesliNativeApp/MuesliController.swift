@@ -8376,7 +8376,7 @@ public final class MuesliController: NSObject {
                             )
                         }
                         guard !entries.isEmpty else { return }
-                        self.noteMeetingTranscriptActivity()
+                        self.noteMeetingTranscriptActivity(channel: MeetingTranscriptChannel(liveSpeaker: speaker))
                         do {
                             try self.dictationStore.appendLiveTranscriptCheckpoints(meetingID: meetingID, entries: entries)
                         } catch {
@@ -8408,7 +8408,7 @@ public final class MuesliController: NSObject {
                             self.appState.liveMeetingPartialOthers = tail
                         }
                         if !tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            self.noteMeetingTranscriptActivity()
+                            self.noteMeetingTranscriptActivity(channel: MeetingTranscriptChannel(liveSpeaker: speaker))
                         }
                         self.indicator.updateMeetingTranscript(
                             transcript: self.appState.liveMeetingTranscript,
@@ -10436,7 +10436,8 @@ public final class MuesliController: NSObject {
         meetingNotification.close()
     }
 
-    private func noteMeetingTranscriptActivity() {
+    /// `channel` is nil when the recording starts or resumes rather than for speech.
+    private func noteMeetingTranscriptActivity(channel: MeetingTranscriptChannel? = nil) {
         guard activeMeetingSession?.isRecording == true,
               activeMeetingSession?.isPaused == false,
               !isStoppingMeetingRecording else { return }
@@ -10444,11 +10445,14 @@ public final class MuesliController: NSObject {
         if usesInactivityReminder {
             meetingSignalLossPromptState.markSourceRecovered()
         }
-        meetingSignalLossPromptState.noteTranscriptActivity(now: Date())
+        // The state decides whether this speech means the meeting goes on: a stopping
+        // warning ignores the user's own microphone. It also keeps a closed warning
+        // suppressed until the source recovers, unless remote speech re-arms a stop.
+        let meetingGoesOn = meetingSignalLossPromptState.noteTranscriptActivity(now: Date(), channel: channel)
         let promptID = meetingSignalLossPromptID(for: activeMeetingID)
-        if meetingNotification.isVisible,
+        if meetingGoesOn,
+           meetingNotification.isVisible,
            meetingNotification.currentPromptID == promptID {
-            if !usesInactivityReminder { meetingSignalLossPromptState.markAutoDismissed() }
             meetingNotification.close()
         }
         if usesInactivityReminder { scheduleMeetingInactivityReminder() }
@@ -10476,10 +10480,11 @@ public final class MuesliController: NSObject {
     }
 
     private func presentMeetingSignalLossPromptIfNeeded() {
+        let response = activeMeetingSignalLossResponse.stoppingWhenMeetingEnds(config.stopRecordingWhenMeetingEnds)
         guard activeMeetingSignalLossResponse != .none,
               meetingSignalLossPromptState.canPresentPrompt,
               !meetingSignalLossPromptState.hasRecentTranscriptActivity(
-                  now: Date(), quietPeriod: MeetingSignalLossPromptState.transcriptQuietPeriod
+                  now: Date(), quietPeriod: MeetingSignalLossPromptState.transcriptQuietPeriod, response: response
               ),
               activeMeetingSession?.isRecording == true,
               activeMeetingSession?.isPaused == false,
@@ -10489,12 +10494,15 @@ public final class MuesliController: NSObject {
         let promptID = meetingSignalLossPromptID(for: meetingID)
         guard meetingNotification.currentPromptID != promptID || !meetingNotification.isVisible else { return }
 
-        meetingSignalLossPromptState.markPromptPresented()
+        meetingSignalLossPromptState.markPromptPresented(response: response)
+        let stopsOnTimeout = meetingSignalLossPromptState.isStopPending
         let didShow = meetingNotification.show(
             promptID: promptID,
             title: activeMeetingSignalLossResponse == .transcriptInactivity
                 ? "Is the meeting still happening?" : "Meeting signal lost",
-            subtitle: "Recording continues. Stop if the meeting ended.",
+            subtitle: stopsOnTimeout
+                ? "Stopping in \(Int(MeetingSignalLossPromptState.notificationDuration)) s. Close this to keep recording."
+                : "Recording continues. Stop if the meeting ended.",
             actionLabel: "Stop Transcribing",
             dismissAfter: MeetingSignalLossPromptState.notificationDuration,
             // MeetingNotificationController uses onStartRecording as its generic
@@ -10510,7 +10518,13 @@ public final class MuesliController: NSObject {
             onAutoDismiss: { [weak self] in
                 guard let self else { return }
                 guard self.activeMeetingID == meetingID else { return }
-                self.meetingSignalLossPromptState.markAutoDismissed()
+                // Only an unanswered stopping warning ends the recording; closing it keeps recording.
+                guard self.meetingSignalLossPromptState.markTimedOut(),
+                      self.activeMeetingSession?.isRecording == true,
+                      self.activeMeetingSession?.isPaused == false,
+                      !self.isStoppingMeetingRecording else { return }
+                fputs("[muesli-native] meeting signal lost; warning timed out, stopping recording\n", stderr)
+                self.stopMeetingRecording()
             }
         )
         if !didShow { meetingSignalLossPromptState.markAutoDismissed() }
@@ -14569,6 +14583,13 @@ public final class MuesliController: NSObject {
 
     private func showMeetingEndNotification(title: String) {
         guard isMeetingRecording() else { return }
+        // The scheduled end alone never stops a recording. It must not replace a
+        // signal-loss warning that is about to stop one, or that stop would be lost.
+        if meetingSignalLossPromptState.isStopPending,
+           meetingNotification.isVisible,
+           meetingNotification.currentPromptID == meetingSignalLossPromptID(for: activeMeetingID) {
+            return
+        }
         meetingNotification.show(
             title: "Scheduled time ended",
             subtitle: "\(title) may still be ongoing. Stop when finished.",
