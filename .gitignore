@@ -117,3 +117,6 @@ context.md
 *~
 .vercel
 docs/reports/meeting-transcription-pipeline.svg
+
+# fork-infra build output (fork-infra/build.sh)
+/release/
