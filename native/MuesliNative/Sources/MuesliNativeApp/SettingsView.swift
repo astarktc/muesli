@@ -2519,6 +2519,13 @@ struct SettingsView: View {
 
                 if appState.config.showMeetingDetectionNotification {
                     Divider().background(MuesliTheme.surfaceBorder)
+                    settingsCompactRow(
+                        "Auto-record detected meetings",
+                        description: "Starts without asking when the call is confirmed: a meeting app or meeting link using the microphone, the camera on too, or a calendar event. Other detections still ask."
+                    ) {
+                        settingsControl("auto_record_detected_meetings")
+                    }
+                    Divider().background(MuesliTheme.surfaceBorder)
                     mutedMeetingDetectionAppsControl
                 }
             }
