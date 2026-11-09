@@ -1404,9 +1404,15 @@ final class MeetingSession {
 
             let floatSamples = self.microphoneExclusions.redact(audio).samples.map { Float($0) / 32767.0 }
 
-            // AEC: clean mic using position-aligned system reference
+            // AEC: clean mic using position-aligned system reference. A capture gap
+            // (input switch, route recovery) is filled with silence first, so the mic
+            // stays aligned with the system reference and with meeting time.
+            let processed = self.neuralAec.processStreamingMic(floatSamples, capturedAt: audio.startFrame)
+            if processed.paddedFrames > 0 {
+                self.screenMicSpans.append(start: audio.startFrame - Int64(processed.paddedFrames), count: processed.paddedFrames)
+            }
             self.screenMicSpans.append(start: audio.startFrame, count: rawSamples.count)
-            let cleanedFloat = self.neuralAec.processStreamingMic(floatSamples)
+            let cleanedFloat = processed.cleaned
             self.appendCleanedMicSamplesOnQueue(cleanedFloat)
         }
     }

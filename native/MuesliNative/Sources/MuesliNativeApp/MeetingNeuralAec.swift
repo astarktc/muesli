@@ -130,6 +130,12 @@ final class MeetingNeuralAec {
     private var delayHistory: [MeetingAecDelayObservation] = []
     private var delaySkipHistory: [MeetingAecDelaySkip] = []
     private let maxReferenceWaitSamples = 48_000
+    /// A capture gap shorter than this (200 ms) is buffer timing jitter, not a dropout.
+    static let minimumMicGapFrames: Int64 = 3_200
+    /// Host-clock end (16 kHz frames) of the last captured mic block; nil until the first block after a reset.
+    private var lastMicCaptureEndFrame: Int64?
+    private var micGapCount = 0
+    private var micGapPaddedFrames = 0
 
     init(selection: MeetingAecProcessorSelection = .environmentDefault) {
         self.selection = selection
@@ -198,6 +204,9 @@ final class MeetingNeuralAec {
         delayHistory.removeAll(keepingCapacity: true)
         delaySkipHistory.removeAll(keepingCapacity: true)
         lastProcessingError = nil
+        lastMicCaptureEndFrame = nil
+        micGapCount = 0
+        micGapPaddedFrames = 0
     }
 
     /// Buffer system audio samples indexed by absolute position.
@@ -213,6 +222,36 @@ final class MeetingNeuralAec {
     }
 
     /// Process mic samples through the loaded AEC processor using the currently estimated far-end delay.
+    /// Process a captured mic block, first inserting silence for any capture gap before it.
+    ///
+    /// Mic and system positions are sample counts since the same reset, so a mic dropout
+    /// (input device switch, route recovery) while the system tap keeps running would pair
+    /// every later mic frame with far-end audio from the gap's length earlier, and echo
+    /// cancellation would stop for the rest of the meeting. The inserted silence is bounded by
+    /// how far the system reference has run ahead, so a gap in both streams (sleep) inserts none.
+    /// The silence precedes the block in the output, so the caller maps `paddedFrames` output
+    /// frames to `startFrame - paddedFrames` on the capture clock.
+    func processStreamingMic(_ micSamples: [Float], capturedAt startFrame: Int64) -> (cleaned: [Float], paddedFrames: Int) {
+        let padding = micGapPadding(beforeBlockStartingAt: startFrame)
+        lastMicCaptureEndFrame = startFrame + Int64(micSamples.count)
+        guard padding > 0 else { return (processStreamingMic(micSamples), 0) }
+        micGapCount += 1
+        micGapPaddedFrames += padding
+        Self.logger.info("Mic capture gap: inserted \(padding, privacy: .public) silent frames to keep the echo reference aligned")
+        return (processStreamingMic([Float](repeating: 0, count: padding) + micSamples), padding)
+    }
+
+    func micGapPadding(beforeBlockStartingAt startFrame: Int64) -> Int {
+        guard let lastEnd = lastMicCaptureEndFrame else { return 0 }
+        let gap = startFrame - lastEnd
+        guard gap >= Self.minimumMicGapFrames else { return 0 }
+        // Pad only when the system reference really ran ahead of the mic; a lead within
+        // buffer jitter means the streams are still aligned.
+        let systemLead = systemAbsoluteEndSample - micSamplesReceived
+        guard systemLead >= Int(Self.minimumMicGapFrames) else { return 0 }
+        return min(Int(gap), systemLead)
+    }
+
     func processStreamingMic(_ micSamples: [Float]) -> [Float] {
         // Always maintain history so trimHistoryBuffersIfNeeded() keeps the buffer bounded
         // regardless of whether the model is loaded. The delay estimator also benefits
@@ -532,7 +571,9 @@ final class MeetingNeuralAec {
             bufferedMicSamples: pendingMicSamples.count,
             currentDelayMs: Int(round(Double(currentDelaySamples) * 1000.0 / Double(sampleRate))),
             delayHistory: delayHistory,
-            delaySkipHistory: delaySkipHistory
+            delaySkipHistory: delaySkipHistory,
+            micGapCount: micGapCount,
+            micGapPaddedFrames: micGapPaddedFrames
         )
     }
 }
