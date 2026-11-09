@@ -239,9 +239,19 @@ final class MeetingNeuralAec {
         return processQueuedFrames(processor: processor, flush: true)
     }
 
+    /// LocalVQE aligns the far end to the echo internally, but only causally: within its
+    /// window (dmax 64 hops, about 1 s) the playback must reach the model before its echo.
+    /// The two capture streams are matched by sample count from their first callbacks,
+    /// which leaves a startup offset of a few milliseconds in either direction. When the
+    /// echo sat a few ms ahead of its playback at the same count, LocalVQE removed nothing
+    /// for the whole recording. Pairing each mic frame with the system audio 128 ms after
+    /// it (a negative reference delay) keeps every such offset inside the causal window,
+    /// at the cost of 128 ms more cleaned-mic latency.
+    static let localVQEReferenceLeadSamples = 2_048
+
     private func referenceDelaySamples(for processor: MeetingAecProcessor? = nil) -> Int {
         let activeProcessor = processor ?? self.processor
-        return activeProcessor?.name == "localvqe" ? 0 : currentDelaySamples
+        return activeProcessor?.name == "localvqe" ? -Self.localVQEReferenceLeadSamples : currentDelaySamples
     }
 
     private func processQueuedFrames(processor: MeetingAecProcessor, flush: Bool) -> [Float] {

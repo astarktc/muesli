@@ -201,18 +201,25 @@ struct MeetingNeuralAecTests {
         #expect(aec.diagnosticsSnapshot.fullReferenceFrames > 0)
     }
 
-    @Test("LocalVQE uses timestamp aligned references")
-    func localVQEUsesTimestampAlignedReferences() {
+    @Test("LocalVQE takes its reference a fixed lead ahead of the mic frame")
+    func localVQEReferenceLeadsMicFrame() {
         let processor = PassthroughAecProcessor(name: "localvqe", frameSize: 256)
         let aec = MeetingNeuralAec(preloadedProcessor: processor)
         aec.resetForStreaming()
-        aec.feedSystemSamples([Float](repeating: 0.2, count: 512))
+        let lead = MeetingNeuralAec.localVQEReferenceLeadSamples
+        let leadFrames = lead / 256
+        aec.feedSystemSamples([Float](repeating: 0.1, count: lead))
 
-        let input = [Float](repeating: 0.4, count: 512)
-        _ = aec.processStreamingMic(input)
+        // A mic frame at position p is paired with the system audio from p + lead, so the
+        // model sees playback before its echo; the frame waits until that audio exists.
+        #expect(aec.processStreamingMic([Float](repeating: 0.4, count: lead)).isEmpty)
+        aec.feedSystemSamples([Float](repeating: 0.2, count: lead))
+        let cleaned = aec.processStreamingMic([])
 
+        #expect(cleaned.count == lead)
+        #expect(processor.processedFrameCount == leadFrames)
         #expect(processor.firstReferenceFrameFirstSample == 0.2)
-        #expect(processor.processedFrameCount == 2)
+        #expect(aec.diagnosticsSnapshot.fullReferenceFrames == leadFrames)
     }
 
     @Test("diagnostics report active processor and frame size")
