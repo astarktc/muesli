@@ -86,6 +86,9 @@ struct MeetingAecDiagnosticsSnapshot: Codable {
     let currentDelayMs: Int
     let delayHistory: [MeetingAecDelayObservation]
     let delaySkipHistory: [MeetingAecDelaySkip]
+    /// Mic capture gaps padded with silence to keep the echo reference aligned.
+    let micGapCount: Int
+    let micGapPaddedFrames: Int
 }
 
 extension MeetingAecDiagnosticsSnapshot {
@@ -104,6 +107,8 @@ extension MeetingAecDiagnosticsSnapshot {
         case currentDelayMs
         case delayHistory
         case delaySkipHistory
+        case micGapCount
+        case micGapPaddedFrames
     }
 
     init(from decoder: Decoder) throws {
@@ -122,6 +127,8 @@ extension MeetingAecDiagnosticsSnapshot {
         currentDelayMs = try container.decode(Int.self, forKey: .currentDelayMs)
         delayHistory = try container.decode([MeetingAecDelayObservation].self, forKey: .delayHistory)
         delaySkipHistory = try container.decode([MeetingAecDelaySkip].self, forKey: .delaySkipHistory)
+        micGapCount = try container.decodeIfPresent(Int.self, forKey: .micGapCount) ?? 0
+        micGapPaddedFrames = try container.decodeIfPresent(Int.self, forKey: .micGapPaddedFrames) ?? 0
     }
 }
 

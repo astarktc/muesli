@@ -215,6 +215,96 @@ struct MeetingNeuralAecTests {
         #expect(processor.processedFrameCount == 2)
     }
 
+    @Test("mic capture gap is padded so later mic frames keep their matching system reference")
+    func micCaptureGapIsPaddedToKeepReferenceAligned() {
+        let processor = PassthroughAecProcessor(name: "localvqe", frameSize: 256)
+        let aec = MeetingNeuralAec(preloadedProcessor: processor)
+        aec.resetForStreaming()
+        let block = 1_536
+        let gap = 64_000 // 4 s: an input switch while the system tap keeps running
+        let start: Int64 = 1_000_000
+
+        aec.feedSystemSamples([Float](repeating: 0.1, count: block))
+        let first = aec.processStreamingMic([Float](repeating: 0.5, count: block), capturedAt: start)
+        aec.feedSystemSamples([Float](repeating: 0.2, count: gap))
+        // System audio from the post-gap mic block onwards; it keeps running after the block.
+        aec.feedSystemSamples([Float](repeating: 0.3, count: block + 4_096))
+        let second = aec.processStreamingMic(
+            [Float](repeating: 0.5, count: block),
+            capturedAt: start + Int64(block + gap)
+        )
+
+        #expect(first.paddedFrames == 0)
+        #expect(second.paddedFrames == gap)
+        #expect(first.cleaned.count + second.cleaned.count == 2 * block + gap)
+        #expect(Array(processor.referenceFirstSamples.suffix(block / 256)) == [Float](repeating: 0.3, count: block / 256))
+        #expect(aec.diagnosticsSnapshot.micGapCount == 1)
+        #expect(aec.diagnosticsSnapshot.micGapPaddedFrames == gap)
+    }
+
+    @Test("mic capture gap is not padded when the system reference stalled too")
+    func micCaptureGapWithoutSystemLeadIsNotPadded() {
+        let aec = MeetingNeuralAec(preloadedProcessor: PassthroughAecProcessor(name: "localvqe", frameSize: 256))
+        aec.resetForStreaming()
+        let block = 1_536
+        aec.feedSystemSamples([Float](repeating: 0.1, count: block))
+        _ = aec.processStreamingMic([Float](repeating: 0.5, count: block), capturedAt: 0)
+        aec.feedSystemSamples([Float](repeating: 0.1, count: block))
+
+        let afterSleep = aec.processStreamingMic([Float](repeating: 0.5, count: block), capturedAt: 640_000)
+
+        #expect(afterSleep.paddedFrames == 0)
+        #expect(aec.diagnosticsSnapshot.micGapCount == 0)
+    }
+
+    @Test("buffer jitter below the gap threshold is not padded")
+    func micBufferJitterIsNotPadded() {
+        let aec = MeetingNeuralAec(preloadedProcessor: PassthroughAecProcessor(name: "localvqe", frameSize: 256))
+        aec.resetForStreaming()
+        let block = 1_536
+        aec.feedSystemSamples([Float](repeating: 0.1, count: block * 4))
+        _ = aec.processStreamingMic([Float](repeating: 0.5, count: block), capturedAt: 0)
+
+        let jittered = aec.processStreamingMic(
+            [Float](repeating: 0.5, count: block),
+            capturedAt: Int64(block) + MeetingNeuralAec.minimumMicGapFrames - 1
+        )
+
+        #expect(jittered.paddedFrames == 0)
+    }
+
+    @Test("reset forgets the previous mic block, so a resumed recording is not padded")
+    func resetClearsMicGapTracking() {
+        let aec = MeetingNeuralAec(preloadedProcessor: PassthroughAecProcessor(name: "localvqe", frameSize: 256))
+        aec.resetForStreaming()
+        let block = 1_536
+        aec.feedSystemSamples([Float](repeating: 0.1, count: block))
+        _ = aec.processStreamingMic([Float](repeating: 0.5, count: block), capturedAt: 0)
+
+        aec.resetForStreaming()
+        aec.feedSystemSamples([Float](repeating: 0.1, count: 64_000))
+        let resumed = aec.processStreamingMic([Float](repeating: 0.5, count: block), capturedAt: 320_000)
+
+        #expect(resumed.paddedFrames == 0)
+    }
+
+    @Test("diagnostics decode payloads without mic gap fields")
+    func diagnosticsDecodePayloadWithoutMicGapFields() throws {
+        var payload = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            MeetingNeuralAec(preloadedProcessor: PassthroughAecProcessor(name: "localvqe", frameSize: 256)).diagnosticsSnapshot
+        )) as? [String: Any])
+        payload.removeValue(forKey: "micGapCount")
+        payload.removeValue(forKey: "micGapPaddedFrames")
+
+        let decoded = try JSONDecoder().decode(
+            MeetingAecDiagnosticsSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+
+        #expect(decoded.micGapCount == 0)
+        #expect(decoded.micGapPaddedFrames == 0)
+    }
+
     @Test("diagnostics report active processor and frame size")
     func diagnosticsReportActiveProcessorAndFrameSize() {
         let localVQE = MeetingNeuralAec(preloadedProcessor: PassthroughAecProcessor(name: "localvqe", frameSize: 256))
@@ -361,6 +451,7 @@ private final class PassthroughAecProcessor: MeetingAecProcessor {
     private(set) var processedFrameCount = 0
     private(set) var nonZeroReferenceFrameCount = 0
     private(set) var firstReferenceFrameFirstSample: Float?
+    private(set) var referenceFirstSamples: [Float] = []
 
     init(name: String = "test-passthrough", frameSize: Int) {
         self.name = name
@@ -371,6 +462,7 @@ private final class PassthroughAecProcessor: MeetingAecProcessor {
         processedFrameCount = 0
         nonZeroReferenceFrameCount = 0
         firstReferenceFrameFirstSample = nil
+        referenceFirstSamples = []
     }
 
     func processFrame(mic: [Float], reference: [Float]) throws -> [Float] {
@@ -378,6 +470,7 @@ private final class PassthroughAecProcessor: MeetingAecProcessor {
         if firstReferenceFrameFirstSample == nil {
             firstReferenceFrameFirstSample = reference.first
         }
+        referenceFirstSamples.append(reference.first ?? 0)
         if reference.contains(where: { abs($0) > 0.0001 }) {
             nonZeroReferenceFrameCount += 1
         }
