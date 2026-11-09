@@ -165,7 +165,9 @@ struct MeetingRecordingWriterTests {
 }
 
 private final class SubtractingRecordingAecProcessor: MeetingAecProcessor {
-    let name = "localvqe"
+    // Not "localvqe": that processor pairs each mic frame with system audio a fixed lead
+    // later, and this test needs the reference at the mic frame's own position (delay 0).
+    let name = "aligned-subtracting"
     let frameSize = 4
     let sampleRate = 16_000
     func reset() {}
